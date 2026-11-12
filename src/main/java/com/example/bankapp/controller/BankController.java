@@ -14,6 +14,7 @@ import jakarta.validation.Valid;
 
 import lombok.RequiredArgsConstructor;
 
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.validation.BindingResult;
@@ -21,10 +22,14 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.servlet.mvc.support.RedirectAttributes;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 
 @Controller
 @RequiredArgsConstructor
@@ -37,18 +42,48 @@ public class BankController {
 
     // Display the main bank page
     @GetMapping("/")
-    public String home(Model model) {
+    public String home(
+            @RequestParam(required = false) String keyword,
+            Model model) {
 
-        List<Customer> customers = customerRepository.findAllOrdered();
+        List<Customer> customers;
+
+        if (keyword != null && !keyword.isBlank()) {
+            customers = customerRepository.searchByName(keyword);
+        } else {
+            customers = customerRepository.findAllOrdered();
+        }
 
         model.addAttribute("customers", customers);
+        model.addAttribute("allCustomers",
+                customerRepository.findAllOrdered());
+
         model.addAttribute("customer", new Customer());
         model.addAttribute("transferRequest", new TransferRequest());
+
+        model.addAttribute("totalCustomers",
+                customerRepository.countAccounts());
+
+        model.addAttribute("totalBalance",
+                customerRepository.getTotalBalance());
+
+        model.addAttribute("successCount",
+                transactionRepository.countByStatus(
+                        TransactionStatus.SUCCESS));
+
+        model.addAttribute("failedCount",
+                transactionRepository.countByStatus(
+                        TransactionStatus.FAILED));
+
+        model.addAttribute("transactions",
+                transactionRepository.findAllLatest());
+
+        model.addAttribute("keyword", keyword);
 
         return "bank";
     }
 
-    // Create a new customer
+    // Create a new customer using web form
     @PostMapping("/customers")
     public String createCustomer(
             @Valid @ModelAttribute("customer") Customer customer,
@@ -57,7 +92,9 @@ public class BankController {
 
         if (result.hasErrors()) {
             redirectAttributes.addFlashAttribute(
-                    "errorMessage", "Please enter valid customer details.");
+                    "errorMessage",
+                    "Please enter valid customer details.");
+
             return "redirect:/";
         }
 
@@ -65,17 +102,56 @@ public class BankController {
             bankService.createCustomer(customer);
 
             redirectAttributes.addFlashAttribute(
-                    "successMessage", "Customer created successfully.");
+                    "successMessage",
+                    "Customer created successfully.");
 
         } catch (Exception e) {
             redirectAttributes.addFlashAttribute(
-                    "errorMessage", e.getMessage());
+                    "errorMessage",
+                    e.getMessage());
         }
 
         return "redirect:/";
     }
 
-    // Transfer money between accounts
+    // Create a new customer using REST API (Postman)
+    @PostMapping("/api/customers")
+    @ResponseBody
+    public ResponseEntity<Map<String, Object>> createCustomerApi(
+            @Valid @RequestBody Customer customer,
+            BindingResult result) {
+
+        if (result.hasErrors()) {
+            return ResponseEntity.badRequest().body(
+                    Map.of(
+                            "status", "FAILED",
+                            "message", result.getFieldErrors()
+                                    .get(0).getDefaultMessage()
+                    )
+            );
+        }
+
+        try {
+            bankService.createCustomer(customer);
+
+            return ResponseEntity.ok(
+                    Map.of(
+                            "status", "SUCCESS",
+                            "message", "Customer created successfully."
+                    )
+            );
+
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(
+                    Map.of(
+                            "status", "FAILED",
+                            "message", String.valueOf(e.getMessage())
+                    )
+            );
+        }
+    }
+
+    // Transfer money using web form
     @PostMapping("/transfer")
     public String transfer(
             @Valid @ModelAttribute("transferRequest") TransferRequest request,
@@ -84,7 +160,9 @@ public class BankController {
 
         if (result.hasErrors()) {
             redirectAttributes.addFlashAttribute(
-                    "errorMessage", "Please enter valid transfer details.");
+                    "errorMessage",
+                    "Please enter valid transfer details.");
+
             return "redirect:/";
         }
 
@@ -98,7 +176,8 @@ public class BankController {
             );
 
             redirectAttributes.addFlashAttribute(
-                    "successMessage", "Transfer completed successfully.");
+                    "successMessage",
+                    "Transfer completed successfully.");
 
         } catch (Exception e) {
 
@@ -109,17 +188,83 @@ public class BankController {
                         request.getAmount(),
                         e.getMessage()
                 );
+
             } catch (Exception auditException) {
                 redirectAttributes.addFlashAttribute(
-                        "errorMessage", "Transfer failed and audit record could not be saved.");
+                        "errorMessage",
+                        "Transfer failed and audit record could not be saved.");
+
                 return "redirect:/";
             }
 
             redirectAttributes.addFlashAttribute(
-                    "errorMessage", "Transfer failed: " + e.getMessage());
+                    "errorMessage",
+                    "Transfer failed: " + e.getMessage());
         }
 
         return "redirect:/";
+    }
+
+    // Transfer money using REST API (Postman)
+    @PostMapping("/api/transfer")
+    @ResponseBody
+    public ResponseEntity<Map<String, Object>> transferApi(
+            @Valid @RequestBody TransferRequest request,
+            BindingResult result) {
+
+        if (result.hasErrors()) {
+            return ResponseEntity.badRequest().body(
+                    Map.of(
+                            "status", "FAILED",
+                            "message", result.getFieldErrors()
+                                    .get(0).getDefaultMessage()
+                    )
+            );
+        }
+
+        try {
+            bankService.transfer(
+                    request.getFromAccount(),
+                    request.getToAccount(),
+                    request.getAmount(),
+                    request.getDescription(),
+                    request.isSimulateFailure()
+            );
+
+            return ResponseEntity.ok(
+                    Map.of(
+                            "status", "SUCCESS",
+                            "message", "Transfer completed successfully."
+                    )
+            );
+
+        } catch (Exception e) {
+
+            try {
+                auditService.recordFailedTransaction(
+                        request.getFromAccount(),
+                        request.getToAccount(),
+                        request.getAmount(),
+                        e.getMessage()
+                );
+
+            } catch (Exception auditException) {
+                return ResponseEntity.internalServerError().body(
+                        Map.of(
+                                "status", "FAILED",
+                                "message",
+                                "Transfer failed and audit record could not be saved."
+                        )
+                );
+            }
+
+            return ResponseEntity.badRequest().body(
+                    Map.of(
+                            "status", "FAILED",
+                            "message", e.getMessage()
+                    )
+            );
+        }
     }
 
     // Display transaction history of an account
@@ -135,7 +280,9 @@ public class BankController {
 
         if (customer == null) {
             redirectAttributes.addFlashAttribute(
-                    "errorMessage", "Account not found.");
+                    "errorMessage",
+                    "Account not found.");
+
             return "redirect:/";
         }
 
